@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api-whatsapp",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "WHATSAPP_API_KEY=dev-local-apenas-teste node server.js"],
+      "port": 4000
+    }
+  ]
+}

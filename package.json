@@ -1,0 +1,19 @@
+{
+  "name": "api-whatsapp",
+  "version": "1.0.0",
+  "description": "Serviço standalone de conexões WhatsApp (whatsapp-web.js) via HTTP — consumido por outras aplicações para disparar lembretes, alertas ou campanhas.",
+  "main": "server.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.22.2",
+    "whatsapp-web.js": "^1.26.0",
+    "qrcode": "^1.5.4",
+    "dotenv": "^16.4.5"
+  }
+}
