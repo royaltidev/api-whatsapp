@@ -49,3 +49,41 @@ Crie um software com `POST /v1/clientes`, body `{ "id": "sistema-like", "nome": 
 usando `X-API-Key: <token-do-software>`. A sessão é isolada em disco por cliente e o token não escolhe uma linha pela URL: ele só pode operar a própria conexão. Por padrão são permitidas até 10 conexões Chromium simultâneas; ajuste `WHATSAPP_MAX_CLIENTES` no `.env` conforme a memória disponível.
 
 As rotas antigas `/:linha/*` continuam disponíveis para as sessões existentes, mas agora exigem `X-Admin-API-Key`; novas integrações devem usar `/v1/whatsapp`.
+
+## Webhook de mensagens recebidas
+
+Cada integração pode cadastrar uma URL para ser avisada quando a sua sessão receber uma mensagem de conversa individual (grupos, status, listas de transmissão e canais são ignorados). Rotas, todas com `X-API-Key: <token-do-software>`:
+
+- `PUT /v1/whatsapp/webhook` — body `{ "url": "https://..." }`. Devolve `{ configurado, url, segredo }`; o `segredo` aparece **só nesta resposta**, e cada PUT gera um novo.
+- `GET /v1/whatsapp/webhook` — `{ configurado, url }` (sem o segredo).
+- `DELETE /v1/whatsapp/webhook` — remove o webhook.
+
+A URL precisa ser HTTPS e não pode resolver para a rede interna da VPS (`WHATSAPP_WEBHOOK_PERMITIR_LOCAL=true` libera isso só para desenvolvimento). Redirecionamentos não são seguidos.
+
+Cada entrega é um `POST` JSON:
+
+```json
+{
+  "id": "uuid-da-entrega",
+  "evento": "mensagem_recebida",
+  "dados": {
+    "mensagem_id": "false_5577999990000@c.us_ABC",
+    "telefone": "5577999990000",
+    "tipo": "chat",
+    "texto": "Pode sim",
+    "recebido_em": "2026-10-03T15:00:00.000Z"
+  }
+}
+```
+
+`texto` só vem preenchido para `tipo: "chat"`; áudio, imagem etc. chegam com `texto: null`. Contatos que o WhatsApp identifica por LID têm o telefone resolvido antes do envio; se não for possível, a mensagem não é entregue.
+
+Headers: `X-Webhook-Id`, `X-Webhook-Evento`, `X-Webhook-Timestamp` (segundos Unix) e `X-Webhook-Assinatura: sha256=<hex>`, onde o hex é o HMAC-SHA256 de `"<timestamp>.<corpo bruto>"` com o `segredo`. O receptor deve recalcular a assinatura sobre o corpo bruto, comparar em tempo constante e recusar timestamps antigos (ex.: mais de 5 minutos).
+
+Responda `2xx` para confirmar. Em erro de rede, timeout (5 s), `408`, `429` ou `5xx`, a entrega é repetida após 2 s, 10 s e 30 s; outros `4xx` não são repetidos. Os reenvios ficam em memória — um reinício do serviço no meio deles perde o evento. O conteúdo das mensagens nunca vai para o log, só o resultado da entrega.
+
+## Testes
+
+```
+npm test
+```

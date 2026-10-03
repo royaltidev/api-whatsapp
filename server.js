@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const { criarConexaoWhatsapp } = require('./lib/whatsapp');
+const { validarUrlWebhook, entregarWebhook } = require('./lib/webhook');
 
 // whatsapp-web.js/Puppeteer pode rejeitar uma operação interna durante uma
 // navegação do WhatsApp Web. Registre a falha sem derrubar todas as demais
@@ -14,6 +15,7 @@ process.on('uncaughtException', (erro) => console.error('Exceção isolada no Wh
 const CHAVE_ADMIN = process.env.WHATSAPP_API_KEY;
 const PORT = process.env.WHATSAPP_SERVICO_PORT || 4000;
 const MAX_CLIENTES = Number(process.env.WHATSAPP_MAX_CLIENTES || 10);
+const WEBHOOK_PERMITIR_LOCAL = process.env.WHATSAPP_WEBHOOK_PERMITIR_LOCAL === 'true';
 const DATA_DIR = path.join(__dirname, 'data');
 const CLIENTES_DIR = path.join(DATA_DIR, 'clientes');
 const ARQUIVO_CLIENTES = path.join(DATA_DIR, 'clientes.json');
@@ -45,7 +47,7 @@ function enfileirarInicializacao(tarefa) {
   return proxima;
 }
 function clientePublico(cliente, conexao) {
-  return { id: cliente.id, nome: cliente.nome, criado_em: cliente.criado_em, status: conexao?.status().status || 'nao_iniciado' };
+  return { id: cliente.id, nome: cliente.nome, criado_em: cliente.criado_em, status: conexao?.status().status || 'nao_iniciado', webhook_configurado: Boolean(cliente.webhook_url) };
 }
 function auditar(cliente, acao) {
   console.log(JSON.stringify({ evento: 'api_whatsapp', cliente: cliente.id, acao, em: new Date().toISOString() }));
@@ -58,11 +60,22 @@ async function obterConexaoCliente(cliente) {
   if (conexoesClientes.size >= MAX_CLIENTES) {
     const erro = new Error(`Limite de ${MAX_CLIENTES} conexões simultâneas atingido.`); erro.statusCode = 503; throw erro;
   }
-  const conexao = criarConexaoWhatsapp(`cliente-${cliente.id}`, path.join(CLIENTES_DIR, cliente.id, 'whatsapp-session'));
+  const conexao = criarConexaoWhatsapp(`cliente-${cliente.id}`, path.join(CLIENTES_DIR, cliente.id, 'whatsapp-session'), {
+    aoReceberMensagem: (dados) => notificarMensagemRecebida(cliente.id, dados),
+  });
   conexoesClientes.set(cliente.id, conexao);
   const inicio = enfileirarInicializacao(() => conexao.iniciar()).then(() => conexao).catch((erro) => { conexoesClientes.delete(cliente.id); throw erro; }).finally(() => inicializacoes.delete(cliente.id));
   inicializacoes.set(cliente.id, inicio);
   return inicio;
+}
+// Busca o cadastro atual a cada mensagem: o webhook pode ter sido trocado ou o
+// cliente revogado depois que a conexão subiu. O conteúdo da mensagem nunca
+// vai para o log, só o resultado da entrega.
+function notificarMensagemRecebida(clienteId, dados) {
+  const cliente = clientes.find((item) => item.id === clienteId);
+  if (!cliente?.webhook_url || !cliente.webhook_segredo) return;
+  entregarWebhook({ url: cliente.webhook_url, segredo: cliente.webhook_segredo }, 'mensagem_recebida', dados, { permitirLocal: WEBHOOK_PERMITIR_LOCAL })
+    .then((resultado) => auditar(cliente, resultado.ok ? 'webhook_entregue' : `webhook_falhou: ${resultado.erro}`));
 }
 function autenticarAdmin(req, res, next) {
   if (!compararSegredo(req.header('X-Admin-API-Key') || '', CHAVE_ADMIN)) return res.status(401).json({ erro: 'Chave administrativa inválida' });
@@ -236,6 +249,26 @@ app.post('/v1/whatsapp/enviar', autenticarCliente, async (req, res) => {
     const imagem = imagemBase64 ? { base64: imagemBase64, mimetype: imagemMime, nome: imagemNome } : undefined;
     await conexao.enviarMensagem(telefone, texto, imagem); auditar(req.cliente, 'mensagem_enviada'); res.json({ ok: true });
   } catch (erro) { responderErro(res, erro, 'Erro ao enviar mensagem'); }
+});
+
+// Webhook do próprio cliente. O segredo de assinatura é gerado aqui e
+// devolvido uma única vez; cada PUT gera um segredo novo. Diferente do token,
+// ele fica guardado em claro (arquivo 0600), porque é necessário para assinar.
+app.get('/v1/whatsapp/webhook', autenticarCliente, (req, res) => {
+  res.json({ configurado: Boolean(req.cliente.webhook_url), url: req.cliente.webhook_url || null });
+});
+app.put('/v1/whatsapp/webhook', autenticarCliente, (req, res) => {
+  try {
+    const url = validarUrlWebhook(req.body?.url, { permitirLocal: WEBHOOK_PERMITIR_LOCAL });
+    const segredo = crypto.randomBytes(32).toString('hex');
+    req.cliente.webhook_url = url; req.cliente.webhook_segredo = segredo;
+    salvarClientes(); auditar(req.cliente, 'webhook_configurado');
+    res.json({ configurado: true, url, segredo });
+  } catch (erro) { responderErro(res, erro, 'Erro ao configurar webhook'); }
+});
+app.delete('/v1/whatsapp/webhook', autenticarCliente, (req, res) => {
+  delete req.cliente.webhook_url; delete req.cliente.webhook_segredo;
+  salvarClientes(); auditar(req.cliente, 'webhook_removido'); res.json({ ok: true });
 });
 
 // Compatibilidade com as duas linhas pré-existentes. Novas integrações devem
