@@ -159,8 +159,7 @@ app.post('/admin/api/logout', exigirPainel, (req, res) => {
 });
 app.get('/admin/api/conexoes', exigirPainel, (req, res) => {
   const clienteStatus = clientes.map((cliente) => ({ ...clientePublico(cliente, conexoesClientes.get(cliente.id)), ...(conexoesClientes.get(cliente.id)?.status() || {}) }));
-  const legadas = Object.entries(linhasLegadas).map(([id, conexao]) => ({ id, nome: `Linha legada: ${id}`, legado: true, ...conexao.status() }));
-  res.json({ clientes: clienteStatus, legadas, memoria_mb: Math.round(process.memoryUsage().rss / 1024 / 1024), processos_ativos: conexoesClientes.size + Object.keys(linhasLegadas).length });
+  res.json({ clientes: clienteStatus, memoria_mb: Math.round(process.memoryUsage().rss / 1024 / 1024), processos_ativos: conexoesClientes.size });
 });
 app.post('/admin/api/clientes', exigirPainel, (req, res) => {
   const { id, nome } = req.body || {};
@@ -192,11 +191,6 @@ app.post('/admin/api/clientes/:id/encerrar', exigirPainel, async (req, res) => {
   const conexao = conexoesClientes.get(req.params.id);
   if (!conexao) return res.status(404).json({ erro: 'Não há processo ativo para este cliente.' });
   try { await encerrarConexao(req.params.id, conexao); res.json({ ok: true }); } catch (erro) { responderErro(res, erro, 'Erro ao encerrar processo'); }
-});
-app.post('/admin/api/legadas/:id/encerrar', exigirPainel, async (req, res) => {
-  const conexao = linhasLegadas[req.params.id];
-  if (!conexao) return res.status(404).json({ erro: 'Linha não encontrada.' });
-  try { await conexao.parar(); res.json({ ok: true }); } catch (erro) { responderErro(res, erro, 'Erro ao encerrar processo'); }
 });
 app.post('/admin/api/reiniciar', exigirPainel, (req, res) => {
   res.status(202).json({ ok: true }); setTimeout(() => process.exit(0), 250);
@@ -271,33 +265,4 @@ app.delete('/v1/whatsapp/webhook', autenticarCliente, (req, res) => {
   salvarClientes(); auditar(req.cliente, 'webhook_removido'); res.json({ ok: true });
 });
 
-// Compatibilidade com as duas linhas pré-existentes. Novas integrações devem
-// usar /v1/whatsapp com seu token individual; estas rotas exigem a chave admin.
-const linhasLegadas = {
-  lembretes: criarConexaoWhatsapp('lembretes', path.join(DATA_DIR, 'whatsapp-session')),
-  envios: criarConexaoWhatsapp('envios', path.join(DATA_DIR, 'whatsapp-envios-session')),
-};
-function linhaLegada(req, res) {
-  const linha = linhasLegadas[req.params.linha];
-  if (!linha) res.status(404).json({ erro: `Linha desconhecida: ${req.params.linha}` });
-  return linha;
-}
-app.get('/:linha/status', autenticarAdmin, (req, res) => { const linha = linhaLegada(req, res); if (linha) res.json(linha.status()); });
-app.post('/:linha/reconectar', autenticarAdmin, async (req, res) => { const linha = linhaLegada(req, res); if (!linha) return; try { await linha.reconectar(); res.json(linha.status()); } catch (erro) { responderErro(res, erro, 'Erro ao reconectar'); } });
-app.post('/:linha/desconectar', autenticarAdmin, async (req, res) => { const linha = linhaLegada(req, res); if (!linha) return; try { await linha.desconectar(); res.json(linha.status()); } catch (erro) { responderErro(res, erro, 'Erro ao desconectar'); } });
-app.post('/:linha/enviar', autenticarAdmin, async (req, res) => {
-  const linha = linhaLegada(req, res); const { telefone, texto, imagemBase64, imagemMime, imagemNome } = req.body || {};
-  if (!linha) return; if (!telefone || !texto) return res.status(400).json({ erro: 'Informe telefone e texto' });
-  try { await linha.enviarMensagem(telefone, texto, imagemBase64 ? { base64: imagemBase64, mimetype: imagemMime, nome: imagemNome } : undefined); res.json({ ok: true }); }
-  catch (erro) { responderErro(res, erro, 'Erro ao enviar mensagem'); }
-});
-
 app.listen(PORT, '127.0.0.1', () => console.log(`Serviço WhatsApp rodando em http://127.0.0.1:${PORT}`));
-(async () => {
-  // Sobe linhas legadas uma por vez para não competir pelo Chromium durante
-  // boot. Clientes multi-tenant continuam sendo iniciados sob demanda.
-  for (const [nome, linha] of Object.entries(linhasLegadas)) {
-    try { await enfileirarInicializacao(() => linha.iniciar()); }
-    catch (erro) { console.error(`Erro ao iniciar ${nome}:`, erro.message); }
-  }
-})();
