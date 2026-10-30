@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
+const nodemailer = require('nodemailer');
 const { criarConexaoWhatsapp } = require('./lib/whatsapp');
 const { validarUrlWebhook, entregarWebhook } = require('./lib/webhook');
 
@@ -22,6 +23,12 @@ const DATA_DIR = path.join(__dirname, 'data');
 const CLIENTES_DIR = path.join(DATA_DIR, 'clientes');
 const ARQUIVO_CLIENTES = path.join(DATA_DIR, 'clientes.json');
 const ARQUIVO_PAINEL = path.join(DATA_DIR, 'painel-admin.json');
+const URL_PUBLICA = (process.env.ADMIN_PUBLIC_URL || 'https://api.crmlive.com.br').replace(/\/$/, '');
+const EMAIL_RECUPERACAO = process.env.ADMIN_RECOVERY_EMAIL;
+const SMTP_HOST = process.env.SMTP_HOST;
+const SMTP_PORT = Number(process.env.SMTP_PORT || 465);
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
 if (!CHAVE_ADMIN) throw new Error('Defina WHATSAPP_API_KEY no .env antes de rodar este serviço.');
 fs.mkdirSync(CLIENTES_DIR, { recursive: true });
 
@@ -98,6 +105,9 @@ function lerPainel() {
 let painel = lerPainel();
 const sessoesPainel = new Map();
 const tentativasLogin = new Map();
+const tentativasRecuperacao = new Map();
+const DURACAO_TOKEN_RECUPERACAO_MS = 30 * 60 * 1000;
+const INTERVALO_RECUPERACAO_MS = 2 * 60 * 1000;
 function senhaHash(senha, salt) { return crypto.scryptSync(senha, salt, 64).toString('hex'); }
 function salvarPainel(dados) {
   const temporario = `${ARQUIVO_PAINEL}.${process.pid}.tmp`;
@@ -119,6 +129,29 @@ function exigirPainel(req, res, next) {
 }
 function encerrarConexao(id, conexao) {
   return conexao.parar().finally(() => { conexoesClientes.delete(id); inicializacoes.delete(id); });
+}
+function configuracaoRecuperacaoValida() {
+  return Boolean(EMAIL_RECUPERACAO && SMTP_HOST && SMTP_USER && SMTP_PASS && SMTP_PORT);
+}
+function limparTokenRecuperacao() {
+  if (!painel) return;
+  delete painel.recuperacao_token_hash;
+  delete painel.recuperacao_expira_em;
+  delete painel.recuperacao_solicitada_em;
+}
+async function enviarEmailRecuperacao(link) {
+  const transporte = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+  await transporte.sendMail({
+    from: `Central WhatsApp <${SMTP_USER}>`,
+    to: EMAIL_RECUPERACAO,
+    subject: 'Redefinição de senha — Central WhatsApp',
+    text: `Foi solicitada uma redefinição de senha para a Central WhatsApp. Use este link em até 30 minutos:\n\n${link}\n\nSe você não solicitou esta ação, ignore este e-mail.`,
+  });
 }
 
 const app = express();
@@ -154,6 +187,53 @@ app.post('/admin/api/login', (req, res) => {
   const token = crypto.randomBytes(32).toString('base64url');
   sessoesPainel.set(token, { expira: Date.now() + 8 * 60 * 60 * 1000 });
   res.setHeader('Set-Cookie', `wa_admin_session=${token}; Path=/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=28800`);
+  res.json({ ok: true });
+});
+app.post('/admin/api/recuperar-senha', async (req, res) => {
+  // A resposta é igual para usuário inexistente e existente, evitando revelar
+  // qual conta administra o painel. O destino nunca vem do navegador.
+  const ip = req.ip || req.socket.remoteAddress || 'desconhecido';
+  const ultimaTentativa = tentativasRecuperacao.get(ip) || 0;
+  if (ultimaTentativa + INTERVALO_RECUPERACAO_MS > Date.now()) {
+    return res.status(429).json({ erro: 'Aguarde um minuto antes de solicitar outro link.' });
+  }
+  tentativasRecuperacao.set(ip, Date.now());
+  if (!painel || !configuracaoRecuperacaoValida()) {
+    return res.json({ ok: true });
+  }
+  const token = crypto.randomBytes(32).toString('base64url');
+  painel.recuperacao_token_hash = hashHex(token);
+  painel.recuperacao_expira_em = Date.now() + DURACAO_TOKEN_RECUPERACAO_MS;
+  painel.recuperacao_solicitada_em = new Date().toISOString();
+  salvarPainel(painel);
+  try {
+    // O token fica no fragmento: ele não é enviado ao servidor nem registrado
+    // nos logs do proxy/requisição.
+    await enviarEmailRecuperacao(`${URL_PUBLICA}/admin/#redefinir-senha=${token}`);
+    console.log(JSON.stringify({ evento: 'api_whatsapp', acao: 'recuperacao_senha_enviada', em: new Date().toISOString() }));
+  } catch (erro) {
+    limparTokenRecuperacao(); salvarPainel(painel);
+    console.error('Falha ao enviar e-mail de recuperação:', erro.message);
+    return res.status(503).json({ erro: 'Não foi possível enviar o link de recuperação. Tente novamente em alguns minutos.' });
+  }
+  res.json({ ok: true });
+});
+app.post('/admin/api/redefinir-senha', (req, res) => {
+  const { token, senha } = req.body || {};
+  const tokenValido = painel
+    && typeof token === 'string'
+    && painel.recuperacao_token_hash
+    && Number(painel.recuperacao_expira_em) > Date.now()
+    && compararSegredo(hashHex(token), painel.recuperacao_token_hash);
+  if (!tokenValido) return res.status(400).json({ erro: 'Este link é inválido ou expirou. Solicite outro.' });
+  if (typeof senha !== 'string' || senha.length < 12) return res.status(400).json({ erro: 'A senha deve ter ao menos 12 caracteres.' });
+  const salt = crypto.randomBytes(16).toString('hex');
+  painel.salt = salt;
+  painel.senha_hash = senhaHash(senha, salt);
+  limparTokenRecuperacao();
+  salvarPainel(painel);
+  sessoesPainel.clear();
+  console.log(JSON.stringify({ evento: 'api_whatsapp', acao: 'senha_painel_redefinida', em: new Date().toISOString() }));
   res.json({ ok: true });
 });
 app.post('/admin/api/logout', exigirPainel, (req, res) => {
