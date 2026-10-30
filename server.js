@@ -16,6 +16,8 @@ const CHAVE_ADMIN = process.env.WHATSAPP_API_KEY;
 const PORT = process.env.WHATSAPP_SERVICO_PORT || 4000;
 const MAX_CLIENTES = Number(process.env.WHATSAPP_MAX_CLIENTES || 10);
 const WEBHOOK_PERMITIR_LOCAL = process.env.WHATSAPP_WEBHOOK_PERMITIR_LOCAL === 'true';
+// Payload v2 (todas as mensagens). Desligado por padrão: ligue só depois que o software cliente aceitar `direcao`.
+const ENTREGAR_TODAS = process.env.WHATSAPP_ENTREGAR_TODAS === 'true';
 const DATA_DIR = path.join(__dirname, 'data');
 const CLIENTES_DIR = path.join(DATA_DIR, 'clientes');
 const ARQUIVO_CLIENTES = path.join(DATA_DIR, 'clientes.json');
@@ -62,6 +64,7 @@ async function obterConexaoCliente(cliente) {
   }
   const conexao = criarConexaoWhatsapp(`cliente-${cliente.id}`, path.join(CLIENTES_DIR, cliente.id, 'whatsapp-session'), {
     aoReceberMensagem: (dados) => notificarMensagemRecebida(cliente.id, dados),
+    entregarTodas: ENTREGAR_TODAS,
   });
   conexoesClientes.set(cliente.id, conexao);
   const inicio = enfileirarInicializacao(() => conexao.iniciar()).then(() => conexao).catch((erro) => { conexoesClientes.delete(cliente.id); throw erro; }).finally(() => inicializacoes.delete(cliente.id));

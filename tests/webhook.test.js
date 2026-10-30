@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('http');
 const { validarUrlWebhook, assinar, entregarWebhook, enderecoInterno } = require('../lib/webhook');
-const { extrairMensagemRecebida } = require('../lib/mensagem-recebida');
+const { extrairMensagemRecebida, extrairMensagem } = require('../lib/mensagem-recebida');
 
 function servidorReceptor(respostas) {
   const recebidas = [];
@@ -92,4 +92,46 @@ test('extrairMensagemRecebida trata contato, LID, grupos e mídia', async () => 
   assert.equal(await extrairMensagemRecebida({ ...base, from: 'status@broadcast', isStatus: true }, client), null);
   assert.equal(await extrairMensagemRecebida({ ...base, from: '5577999990000@c.us', fromMe: true }, client), null);
   assert.equal(await extrairMensagemRecebida({ ...base, from: '999@lid' }, { getContactLidAndPhone: async () => [{ lid: '999@lid' }] }), null);
+});
+
+test('extrairMensagem (v2) entrega enviadas, grupos e mídia com os campos novos', async () => {
+  const client = { getContactLidAndPhone: async ([lid]) => [{ lid, pn: lid === '777@lid' ? '5577911112222@c.us' : '5577988887777@c.us' }] };
+  const base = { id: { _serialized: 'x_1' }, timestamp: 1790000000, type: 'chat', body: 'Já resolvi aqui' };
+  const em = new Date(1790000000 * 1000).toISOString();
+
+  const recebida = await extrairMensagem({ ...base, from: '5577999990000@c.us' }, client);
+  assert.deepEqual(recebida, {
+    versao: 2, mensagem_id: 'x_1', telefone: '5577999990000', direcao: 'recebida', grupo: false, participante: null,
+    tipo: 'chat', texto: 'Já resolvi aqui', tem_midia: false, legenda: null, duracao_s: null, em, recebido_em: em,
+  });
+  const enviada = await extrairMensagem({ ...base, fromMe: true, from: '5577900000000@c.us', to: '5577999990000@c.us' }, client);
+  assert.equal(enviada.direcao, 'enviada');
+  assert.equal(enviada.telefone, '5577999990000');
+
+  const grupo = await extrairMensagem({ ...base, from: '1203630@g.us', author: '777@lid' }, client);
+  assert.equal(grupo.grupo, true);
+  assert.equal(grupo.telefone, '1203630');
+  assert.equal(grupo.participante, '5577911112222');
+  const grupoEnviada = await extrairMensagem({ ...base, fromMe: true, to: '1203630@g.us' }, client);
+  assert.equal(grupoEnviada.participante, null);
+
+  const audio = await extrairMensagem({ ...base, from: '5577999990000@c.us', type: 'ptt', body: '', hasMedia: true, duration: 42 }, client);
+  assert.equal(audio.texto, null);
+  assert.equal(audio.tem_midia, true);
+  assert.equal(audio.duracao_s, 42);
+  const imagem = await extrairMensagem({ ...base, from: '5577999990000@c.us', type: 'image', body: 'foto da nota', hasMedia: true }, client);
+  assert.equal(imagem.legenda, 'foto da nota');
+  assert.equal(imagem.texto, null);
+
+  assert.equal(await extrairMensagem({ ...base, from: 'status@broadcast', isStatus: true }, client), null);
+  assert.equal(await extrairMensagem({ ...base, from: '5577999990000@c.us', type: 'e2e_notification' }, client), null);
+  assert.equal(await extrairMensagem({ ...base, from: '999@lid' }, { getContactLidAndPhone: async () => [{ lid: '999@lid' }] }), null);
+  assert.equal((await extrairMensagem({ ...base, from: '5577999990000@c.us', body: 'x'.repeat(5000) }, client)).texto.length, 4096);
+});
+
+test('o formato v1 continua ignorando enviadas e grupos', async () => {
+  const client = { getContactLidAndPhone: async () => [] };
+  const base = { id: { _serialized: 'x_2' }, timestamp: 1790000000, type: 'chat', body: 'oi' };
+  assert.equal(await extrairMensagemRecebida({ ...base, from: '5577999990000@c.us', fromMe: true }, client), null);
+  assert.equal(await extrairMensagemRecebida({ ...base, from: '1203630@g.us' }, client), null);
 });

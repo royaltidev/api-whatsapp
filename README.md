@@ -58,6 +58,8 @@ Cada integração pode cadastrar uma URL para ser avisada quando a sua sessão r
 - `GET /v1/whatsapp/webhook` — `{ configurado, url }` (sem o segredo).
 - `DELETE /v1/whatsapp/webhook` — remove o webhook.
 
+**Todas as mensagens (payload v2, opcional):** com `WHATSAPP_ENTREGAR_TODAS=true` o evento `mensagem_recebida` passa a incluir também as mensagens enviadas pelo número (celular ou API) e as de grupo, com os campos extras `versao: 2`, `direcao` (`recebida`/`enviada`), `grupo`, `participante`, `tem_midia`, `legenda`, `duracao_s` e `em` (ISO 8601 UTC). Os campos antigos (`mensagem_id`, `telefone`, `tipo`, `texto`, `recebido_em`) continuam; em grupo, `telefone` é o id do grupo. Padrão desligado: ligue só depois que o software cliente tratar `direcao`, senão uma mensagem enviada seria lida como recebida. Texto limitado a 4096 caracteres; status e listas de transmissão ficam de fora.
+
 A URL precisa ser HTTPS e não pode resolver para a rede interna da VPS (`WHATSAPP_WEBHOOK_PERMITIR_LOCAL=true` libera isso só para desenvolvimento). Redirecionamentos não são seguidos.
 
 Cada entrega é um `POST` JSON:
